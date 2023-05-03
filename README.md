@@ -9,6 +9,8 @@ My implementation of the Tech School's [backend master class](https://www.youtub
 
 [3. How to write & run database migration in Golang](#3)
 
+[4. Generate CRUD Golang code from SQL | Compare db/sql, gorm, sqlx & sqlc](#4)
+
 ## <a id="1"></a> 1. Design DB schema and generate SQL code with dbdiagram.io
 
 Check the dbdiagram.io [schema](https://dbdiagram.io/d/644e30eadca9fb07c4452f97) described in DBML.
@@ -167,3 +169,116 @@ migratedown:
 
 .PHONY: postgres createdb dropdb migrateup migratedown
 ```
+
+## <a id="4"></a> 4. Generate CRUD Golang code from SQL | Compare db/sql, gorm, sqlx & sqlc
+
+DATABASE/SQL:
+- Very fast & straightforward
+- Manual mapping SQL fields to variables
+- Easy to make mistakes, not caught until runtime
+
+GORM:
+- CRUD functions already implemented, very short production code
+- Must learn to write queries using gorm's function
+- Run slowly on high load
+
+SQLX:
+- Quite fast & easy to use
+- Fields mapping via query text & struct tags
+- Failure won't occur until runtime
+
+SQLC:
+- Very fast & easy to use
+- Automatic code generation
+- Catch SQL query errors before generating codes
+- Full support PostgreSQL & MySQL
+
+Install the [sqlc](https://sqlc.dev/) tool.
+
+Inside the project directory, run `sqlc init` to create an empty `sqlc.yaml` settings file.
+
+Create the `sqlc` and `query` folders inside the `db` directory:
+
+```bash
+mkdir db/sqlc
+
+mkdir db/query
+```
+
+Copy and paste the [sample](https://docs.sqlc.dev/en/stable/reference/config.html#version-1) settings into the `sqlc.yaml` file and set these ones to:
+
+```yaml
+path: "./db/sqlc"
+queries: "./db/query/"
+schema: "./db/migration/"
+emit_prepared_queries: false
+json_tags_case_style: "snake"
+```
+
+Remove the `output_batch_file_name: "batch.go"` setting.
+
+Add a new `sqlc` command equivalent to the current OS into `Makefile`:
+
+```Makefile
+sqlc:
+	sqlc generate
+
+.PHONY: ... sqlc
+```
+
+Create the `account.sql` file inside `db/query` folder and enter the following code:
+
+```sql
+-- name: CreateAccount :one
+INSERT INTO accounts (
+  owner,
+  balance,
+  currency
+) VALUES (
+  $1, $2, $3
+) RETURNING *;
+```
+
+Run `make sqlc` command to generate the Go code and explore the generated code in the `db/sqlc` folder.
+
+Append the following code to the `db/query/account.sql` file:
+
+```sql
+-- name: GetAccount :one
+SELECT * FROM accounts
+WHERE id = $1 LIMIT 1;
+
+-- name: ListAccounts :many
+SELECT * FROM accounts
+ORDER BY id
+LIMIT $1
+OFFSET $2;
+```
+
+Regenerate the Go code with the `make sqlc` command and explore the `db/sqlc/account.sql.go` file.
+
+Append the update account code to the `db/query/account.sql` file:
+
+```sql
+-- name: UpdateAccount :one
+UPDATE accounts
+SET balance = $2
+WHERE id = $1
+RETURNING *;
+```
+
+Run the `make sqlc` command to get the new generated Go code.
+
+Append the delete account code to the `db/query/account.sql` file:
+
+```sql
+-- name: DeleteAccount :exec
+DELETE FROM accounts
+WHERE id = $1;
+```
+
+Regenerate the Go code with the `make sqlc` command.
+
+Do the similar thing to the remaining tables `entries` and `transfers`.
+
+Additionally create the `db/schema` folder and move related files into it.
