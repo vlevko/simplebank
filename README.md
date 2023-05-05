@@ -11,6 +11,8 @@ My implementation of the Tech School's [backend master class](https://www.youtub
 
 [4. Generate CRUD Golang code from SQL | Compare db/sql, gorm, sqlx & sqlc](#4)
 
+[5. Write Golang unit tests for database CRUD with random data](#5)
+
 ## <a id="1"></a> 1. Design DB schema and generate SQL code with dbdiagram.io
 
 Check the dbdiagram.io [schema](https://dbdiagram.io/d/644e30eadca9fb07c4452f97) described in DBML.
@@ -282,3 +284,155 @@ Regenerate the Go code with the `make sqlc` command.
 Do the similar thing to the remaining tables `entries` and `transfers`.
 
 Additionally create the `db/schema` folder and move related files into it.
+
+## <a id="5"></a> 5. Write Golang unit tests for database CRUD with random data
+
+Install the PostgreSQL [driver](https://github.com/lib/pq) in order to connect to the database:
+
+```bash
+go get github.com/lib/pq
+```
+
+Setup the database connection and the Queries object in a new `main_test.go` file inside the `db/sqlc` folder:
+
+```go
+package db
+
+import (
+	"database/sql"
+	"log"
+	"os"
+	"testing"
+
+	_ "github.com/lib/pq"
+)
+
+const (
+	dbDriver = "postgres"
+	dbSource = "postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable"
+)
+
+var testQueries *Queries
+
+func TestMain(m *testing.M) {
+	conn, err := sql.Open(dbDriver, dbSource)
+	if err != nil {
+		log.Fatal("cannot connect to db:", err)
+	}
+
+	testQueries = New(conn)
+
+	os.Exit(m.Run())
+}
+```
+
+Run `go mod tidy` inside the project directory to clean up the dependencies.
+
+Install the [testify](https://github.com/stretchr/testify) package to simplify writing unit tests:
+
+```bash
+go get github.com/stretchr/testify
+```
+
+Create a new `util` folder in the project directory:
+
+```bash
+mkdir util
+```
+
+Inside the `util` folder, create a `random.go` file to generate the test data:
+
+```go
+package util
+
+import (
+	"math/rand"
+	"strings"
+	"time"
+)
+
+const alphabet = "abcdefghijklmnopqrstuvwxyz"
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
+// RandomInt generates a random integer between min and max
+func RandomInt(min, max int64) int64 {
+	return min + rand.Int63n(max-min+1)
+}
+
+// RandomString generates a random string of length n
+func RandomString(n int) string {
+	var sb strings.Builder
+	k := len(alphabet)
+
+	for i := 0; i < n; i++ {
+		c := alphabet[rand.Intn(k)]
+		sb.WriteByte(c)
+	}
+
+	return sb.String()
+}
+
+// RandomOwner generates a random owner name
+func RandomOwner() string {
+	return RandomString(6)
+}
+
+// RandomMoney generates a random amount of money
+func RandomMoney() int64 {
+	return RandomInt(0, 1000)
+}
+
+// RandomCurrency generates a random currency code
+func RandomCurrency() string {
+	currencies := []string{"EUR", "USD", "CAD"}
+	n := len(currencies)
+	return currencies[rand.Intn(n)]
+}
+```
+
+Create a new `account_test.go` file inside the `db/sqlc` folder and write a unit test for the `CreateAccount` function: 
+
+```go
+package db
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/vlevko/simplebank/util"
+)
+
+func TestCreateAccount(t *testing.T) {
+	arg := CreateAccountParams{
+		Owner:    util.RandomOwner(),
+		Balance:  util.RandomMoney(),
+		Currency: util.RandomCurrency(),
+	}
+
+	account, err := testQueries.CreateAccount(context.Background(), arg)
+	require.NoError(t, err)
+	require.NotEmpty(t, account)
+
+	require.Equal(t, arg.Owner, account.Owner)
+	require.Equal(t, arg.Balance, account.Balance)
+	require.Equal(t, arg.Currency, account.Currency)
+
+	require.NotZero(t, account.ID)
+	require.NotZero(t, account.CreatedAt)
+}
+```
+
+Add a new `test` command to the `Makefile`:
+
+```Makefile
+test:
+	go test -v -cover ./...
+
+.PHONY: ... test
+```
+
+Write unit tests for the rest of the CRUD operations of `accounts`, `entries` and `transfers` tables.

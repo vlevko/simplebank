@@ -17,4 +17,7 @@ sqlc:
 	# sqlc generate
 	MSYS_NO_PATHCONV=1 docker run --rm -v $(CURDIR):/src -w /src kjconroy/sqlc generate
 
-.PHONY: postgres createdb dropdb migrateup migratedown sqlc
+test:
+	go test -v -cover ./...
+
+.PHONY: postgres createdb dropdb migrateup migratedown sqlc test
