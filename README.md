@@ -13,6 +13,8 @@ My implementation of the Tech School's [backend master class](https://www.youtub
 
 [5. Write Golang unit tests for database CRUD with random data](#5)
 
+[6. A clean way to implement database transaction in Golang](#6)
+
 ## <a id="1"></a> 1. Design DB schema and generate SQL code with dbdiagram.io
 
 Check the dbdiagram.io [schema](https://dbdiagram.io/d/644e30eadca9fb07c4452f97) described in DBML.
@@ -436,3 +438,226 @@ test:
 ```
 
 Write unit tests for the rest of the CRUD operations of `accounts`, `entries` and `transfers` tables.
+
+## <a id="6"></a> 6. A clean way to implement database transaction in Golang
+
+What is a db transaction?
+
+> A single unit of work that's often made up of multiple db operations.
+
+Why do we need db transaction?
+
+> 1\. To provide a reliable and consistent unit of work, even in case of system failure.\
+> 2\. To provide isolation between programs that access the database concurrently.
+
+ACID property:
+
+- Atomacity (A)\
+Either all operations complete successfully or the transaction fails and the db is unchanged.
+- Consistency (C)\
+The db state must be valid after the transaction. All constraints must be satisfied.
+- Isolation (I)\
+Concurrent transactions must not affect each other.
+- Durability (D)\
+Data written by a successful transaction must be recorded in persistent storage.
+
+Create a new file `store.go` inside the `db/sqlc` folder:
+
+```go
+package db
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+)
+
+// Store provides all functions to execute db queries and transactions
+type Store struct {
+	*Queries
+	db *sql.DB
+}
+
+// NewStore creates a new Store
+func NewStore(db *sql.DB) *Store {
+	return &Store{
+		db:      db,
+		Queries: New(db),
+	}
+}
+
+// execTx executes a function within a database transaction
+func (store *Store) execTx(ctx context.Context, fn func(*Queries) error) error {
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+
+	q := New(tx)
+	err = fn(q)
+	if err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return fmt.Errorf("tx err: %v, rb err: %v", err, rbErr)
+		}
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// TransferTxParams contains the input parameters of the transfer transaction
+type TransferTxParams struct {
+	FromAccountID int64 `json:"from_account_id"`
+	ToAccountID   int64 `json:"to_account_id"`
+	Ammount       int64 `json:"amount"`
+}
+
+// TransferTxResult is the result of the transfer transaction
+type TransferTxResult struct {
+	Transfer    Transfer `json:"transfer"`
+	FromAccount Account  `json:"from_account"`
+	ToAccount   Account  `json:"to_account"`
+	FromEntry   Entry    `json:"from_entry"`
+	ToEntry     Entry    `json:"to_entry"`
+}
+
+// TransferTx performs a money transfer from one account to the other.
+// It creates a transfer record, adds account entries, and updates accounts' balance whithin a single database transaction
+func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (TransferTxResult, error) {
+	var result TransferTxResult
+
+	err := store.execTx(ctx, func(q *Queries) error {
+		var err error
+
+		result.Transfer, err = q.CreateTransfer(ctx, CreateTransferParams{
+			FromAccountID: arg.FromAccountID,
+			ToAccountID:   arg.ToAccountID,
+			Amount:        arg.Ammount,
+		})
+		if err != nil {
+			return err
+		}
+
+		result.FromEntry, err = q.CreateEntry(ctx, CreateEntryParams{
+			AccountID: arg.FromAccountID,
+			Amount:    -arg.Ammount,
+		})
+		if err != nil {
+			return err
+		}
+
+		result.ToEntry, err = q.CreateEntry(ctx, CreateEntryParams{
+			AccountID: arg.ToAccountID,
+			Amount:    arg.Ammount,
+		})
+		if err != nil {
+			return err
+		}
+
+		// TODO: update accounts' balance
+
+		return nil
+	})
+
+	return result, err
+}
+```
+
+Creaet a new `store_test.go` file in the same folder to test the `TransferTx` function:
+
+```go
+package db
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestTransferTx(t *testing.T) {
+	store := NewStore(testDB)
+
+	account1 := createRandomAccount(t)
+	account2 := createRandomAccount(t)
+
+	// run n concurrent transfer transactions
+	n := 5
+	amount := int64(10)
+
+	errs := make(chan error)
+	results := make(chan TransferTxResult)
+
+	for i := 0; i < n; i++ {
+		go func() {
+			result, err := store.TransferTx(context.Background(), TransferTxParams{
+				FromAccountID: account1.ID,
+				ToAccountID:   account2.ID,
+				Ammount:       amount,
+			})
+
+			errs <- err
+			results <- result
+		}()
+	}
+
+	// check results
+	for i := 0; i < n; i++ {
+		err := <-errs
+		require.NoError(t, err)
+
+		result := <-results
+		require.NotEmpty(t, result)
+
+		// check transfer
+		transfer := result.Transfer
+		require.NotEmpty(t, transfer)
+		require.Equal(t, account1.ID, transfer.FromAccountID)
+		require.Equal(t, account2.ID, transfer.ToAccountID)
+		require.Equal(t, amount, transfer.Amount)
+		require.NotZero(t, transfer.ID)
+		require.NotZero(t, transfer.CreatedAt)
+
+		_, err = store.GetTransfer(context.Background(), transfer.ID)
+		require.NoError(t, err)
+
+		// check entries
+		fromEntry := result.FromEntry
+		require.NotEmpty(t, fromEntry)
+		require.Equal(t, account1.ID, fromEntry.AccountID)
+		require.Equal(t, -amount, fromEntry.Amount)
+		require.NotZero(t, fromEntry.ID)
+		require.NotZero(t, fromEntry.CreatedAt)
+
+		_, err = store.GetEntry(context.Background(), fromEntry.ID)
+		require.NoError(t, err)
+
+		toEntry := result.ToEntry
+		require.NotEmpty(t, toEntry)
+		require.Equal(t, account2.ID, toEntry.AccountID)
+		require.Equal(t, amount, toEntry.Amount)
+		require.NotZero(t, toEntry.ID)
+		require.NotZero(t, toEntry.CreatedAt)
+
+		_, err = store.GetEntry(context.Background(), toEntry.ID)
+		require.NoError(t, err)
+
+		// TODO: check accounts' balance
+	}
+}
+```
+
+Make the necessary changes in the `main_test.go` file:
+
+```go
+...
+var testDB *sql.DB
+
+func TestMain(m *testing.M) {
+	var err error
+	testDB, err = sql.Open(dbDriver, dbSource)
+	...
+	testQueries = New(testDB)
+	...
+}
+```
