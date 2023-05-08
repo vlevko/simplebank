@@ -15,6 +15,8 @@ My implementation of the Tech School's [backend master class](https://www.youtub
 
 [6. A clean way to implement database transaction in Golang](#6)
 
+[7. DB transaction lock & How to handle deadlock in Golang](#7)
+
 ## <a id="1"></a> 1. Design DB schema and generate SQL code with dbdiagram.io
 
 Check the dbdiagram.io [schema](https://dbdiagram.io/d/644e30eadca9fb07c4452f97) described in DBML.
@@ -661,3 +663,114 @@ func TestMain(m *testing.M) {
 	...
 }
 ```
+
+## <a id="7"></a> 7. DB transaction lock & How to handle deadlock in Golang
+
+Extend the `store_test.go` file with the testing of `accounts` table by applying a Test Driven Development (TDD) approach:
+
+```go
+...
+import (
+	"fmt"
+	...
+)
+...
+func TestTransferTx(t *testing.T) {
+	...
+	fmt.Println(">> before:", account1.Balance, account2.Balance)
+
+	// run n concurrent transfer transactions
+	...
+	// check results
+	existed := make(map[int]bool)
+
+	for i := 0; i < n; i++ {
+		...
+		// check accounts
+		fromAccount := result.FromAccount
+		require.NotEmpty(t, fromAccount)
+		require.Equal(t, account1.ID, fromAccount.ID)
+
+		toAccount := result.ToAccount
+		require.NotEmpty(t, toAccount)
+		require.Equal(t, account2.ID, toAccount.ID)
+
+		// check accounts' balance
+		fmt.Println(">> tx:", fromAccount.Balance, toAccount.Balance)
+		diff1 := account1.Balance - fromAccount.Balance
+		diff2 := toAccount.Balance - account2.Balance
+		require.Equal(t, diff1, diff2)
+		require.True(t, diff1 > 0)
+		require.True(t, diff1%amount == 0) // 1 * amount, 2 * amount, 3 * amount, ..., n * amount
+
+		k := int(diff1 / amount)
+		require.True(t, k >= 1 && k <= n)
+		require.NotContains(t, existed, k)
+		existed[k] = true
+	}
+
+	// check the final updated balances
+	updatedAccount1, err := testQueries.GetAccount(context.Background(), account1.ID)
+	require.NoError(t, err)
+
+	updatedAccount2, err := testQueries.GetAccount(context.Background(), account2.ID)
+	require.NoError(t, err)
+
+	fmt.Println(">> after:", updatedAccount1, updatedAccount2)
+	require.Equal(t, account1.Balance-int64(n)*amount, updatedAccount1.Balance)
+	require.Equal(t, account2.Balance+int64(n)*amount, updatedAccount2.Balance)
+}
+```
+
+Implement the updating accounts' balance feature in the `store.go` file:
+
+```go
+...
+func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (TransferTxResult, error) {
+	...
+	err := store.execTx(ctx, func(q *Queries) error {
+		...
+		result.FromAccount, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
+			ID:      arg.FromAccountID,
+			Amount: -arg.Ammount,
+		})
+		if err != nil {
+			return err
+		}
+
+		result.ToAccount, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
+			ID:      arg.ToAccountID,
+			Amount: arg.Ammount,
+		})
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	return result, err
+}
+```
+
+Update the `account.sql` file inside the `db/query` folder by adding a new query to get account for update:
+```sql
+...
+-- name: GetAccountForUpdate :one
+SELECT * FROM accounts
+WHERE id = $1 LIMIT 1
+FOR NO KEY UPDATE;
+
+-- name: ListAccounts :many
+...
+-- name: AddAccountBalance :one
+UPDATE accounts
+SET balance = balance + sqlc.arg(amount)
+WHERE id = sqlc.arg(id)
+RETURNING *;
+
+-- name: DeleteAccount :exec
+...
+```
+
+Regenerate the code by running the `make sqlc` command.
