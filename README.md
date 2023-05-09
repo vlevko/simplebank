@@ -17,6 +17,8 @@ My implementation of the Tech School's [backend master class](https://www.youtub
 
 [7. DB transaction lock & How to handle deadlock in Golang](#7)
 
+[8. How to avoid deadlock in DB transaction? Queries order matters!](#8)
+
 ## <a id="1"></a> 1. Design DB schema and generate SQL code with dbdiagram.io
 
 Check the dbdiagram.io [schema](https://dbdiagram.io/d/644e30eadca9fb07c4452f97) described in DBML.
@@ -774,3 +776,113 @@ RETURNING *;
 ```
 
 Regenerate the code by running the `make sqlc` command.
+
+## <a id="8"></a> 8. How to avoid deadlock in DB transaction? Queries order matters!
+
+The best way to deal with deadlock is to avoid it.
+
+In the `store_test.go` file inside the `db/sqlc` folder add a new `TestTransferTxDeadlock` function to show how a deadlock error can occur:
+
+```go
+func TestTransferTxDeadlock(t *testing.T) {
+	store := NewStore(testDB)
+
+	account1 := createRandomAccount(t)
+	account2 := createRandomAccount(t)
+	fmt.Println(">> before:", account1.Balance, account2.Balance)
+
+	// run n concurrent transfer transactions
+	n := 10
+	amount := int64(10)
+	errs := make(chan error)
+
+	for i := 0; i < n; i++ {
+		fromAccountID := account1.ID
+		toAccountID := account2.ID
+
+		if i%2 == 1 {
+			fromAccountID = account2.ID
+			toAccountID = account1.ID
+		}
+
+		go func() {
+			_, err := store.TransferTx(context.Background(), TransferTxParams{
+				FromAccountID: fromAccountID,
+				ToAccountID:   toAccountID,
+				Ammount:       amount,
+			})
+
+			errs <- err
+		}()
+	}
+
+	// check results
+	for i := 0; i < n; i++ {
+		err := <-errs
+		require.NoError(t, err)
+	}
+
+	// check the final updated balances
+	updatedAccount1, err := testQueries.GetAccount(context.Background(), account1.ID)
+	require.NoError(t, err)
+
+	updatedAccount2, err := testQueries.GetAccount(context.Background(), account2.ID)
+	require.NoError(t, err)
+
+	fmt.Println(">> after:", updatedAccount1, updatedAccount2)
+	require.Equal(t, account1.Balance, updatedAccount1.Balance)
+	require.Equal(t, account2.Balance, updatedAccount2.Balance)
+}
+```
+
+Avoid the deadlock error by making the following changes in the `store.go` file inside the `db/sqlc` folder so that the application always acquires locks in a consistent order, in particular so that it always updates the account with smaller ID first:
+
+```go
+...
+func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (TransferTxResult, error) {
+	...
+	err := store.execTx(ctx, func(q *Queries) error {
+		...
+		result.ToEntry, err = q.CreateEntry(ctx, CreateEntryParams{
+			AccountID: arg.ToAccountID,
+			Amount:    arg.Ammount,
+		})
+		if err != nil {
+			return err
+		}
+		
+		if arg.FromAccountID < arg.ToAccountID {
+			result.FromAccount, result.ToAccount, err = addMoney(ctx, q, arg.FromAccountID, -arg.Amount, arg.ToAccountID, arg.Amount)
+		} else {
+			result.ToAccount, result.FromAccount, err = addMoney(ctx, q, arg.ToAccountID, arg.Amount, arg.FromAccountID, -arg.Amount)
+		}
+
+		return nil
+	})
+
+	return result, err
+}
+
+func addMoney(
+	ctx context.Context,
+	q *Queries,
+	accountID1 int64,
+	amount1 int64,
+	accountID2 int64,
+	amount2 int64
+) (account1 Account, account2 Account, err error) {
+	account1, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
+		ID: accountID1,
+		Amount: amount1,
+	})
+	if err != nil {
+		return
+	}
+
+	account2, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
+		ID: accountID2,
+		Amount: amount2,
+	})
+	return
+}
+```
