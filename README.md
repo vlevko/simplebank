@@ -19,6 +19,8 @@ My implementation of the Tech School's [backend master class](https://www.youtub
 
 [8. How to avoid deadlock in DB transaction? Queries order matters!](#8)
 
+[9. Understand isolation levels & read phenomena in MySQL & PostgreSQL via examples](#9)
+
 ## <a id="1"></a> 1. Design DB schema and generate SQL code with dbdiagram.io
 
 Check the dbdiagram.io [schema](https://dbdiagram.io/d/644e30eadca9fb07c4452f97) described in DBML.
@@ -513,7 +515,7 @@ func (store *Store) execTx(ctx context.Context, fn func(*Queries) error) error {
 type TransferTxParams struct {
 	FromAccountID int64 `json:"from_account_id"`
 	ToAccountID   int64 `json:"to_account_id"`
-	Ammount       int64 `json:"amount"`
+	Amount        int64 `json:"amount"`
 }
 
 // TransferTxResult is the result of the transfer transaction
@@ -536,7 +538,7 @@ func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (Trans
 		result.Transfer, err = q.CreateTransfer(ctx, CreateTransferParams{
 			FromAccountID: arg.FromAccountID,
 			ToAccountID:   arg.ToAccountID,
-			Amount:        arg.Ammount,
+			Amount:        arg.Amount,
 		})
 		if err != nil {
 			return err
@@ -544,7 +546,7 @@ func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (Trans
 
 		result.FromEntry, err = q.CreateEntry(ctx, CreateEntryParams{
 			AccountID: arg.FromAccountID,
-			Amount:    -arg.Ammount,
+			Amount:    -arg.Amount,
 		})
 		if err != nil {
 			return err
@@ -552,7 +554,7 @@ func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (Trans
 
 		result.ToEntry, err = q.CreateEntry(ctx, CreateEntryParams{
 			AccountID: arg.ToAccountID,
-			Amount:    arg.Ammount,
+			Amount:    arg.Amount,
 		})
 		if err != nil {
 			return err
@@ -597,7 +599,7 @@ func TestTransferTx(t *testing.T) {
 			result, err := store.TransferTx(context.Background(), TransferTxParams{
 				FromAccountID: account1.ID,
 				ToAccountID:   account2.ID,
-				Ammount:       amount,
+				Amount:        amount,
 			})
 
 			errs <- err
@@ -733,16 +735,16 @@ func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (Trans
 	err := store.execTx(ctx, func(q *Queries) error {
 		...
 		result.FromAccount, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
-			ID:      arg.FromAccountID,
-			Amount: -arg.Ammount,
+			ID:     arg.FromAccountID,
+			Amount: -arg.Amount,
 		})
 		if err != nil {
 			return err
 		}
 
 		result.ToAccount, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
-			ID:      arg.ToAccountID,
-			Amount: arg.Ammount,
+			ID:     arg.ToAccountID,
+			Amount: arg.Amount,
 		})
 		if err != nil {
 			return err
@@ -809,7 +811,7 @@ func TestTransferTxDeadlock(t *testing.T) {
 			_, err := store.TransferTx(context.Background(), TransferTxParams{
 				FromAccountID: fromAccountID,
 				ToAccountID:   toAccountID,
-				Ammount:       amount,
+				Amount:        amount,
 			})
 
 			errs <- err
@@ -845,7 +847,7 @@ func (store *Store) TransferTx(ctx context.Context, arg TransferTxParams) (Trans
 		...
 		result.ToEntry, err = q.CreateEntry(ctx, CreateEntryParams{
 			AccountID: arg.ToAccountID,
-			Amount:    arg.Ammount,
+			Amount:    arg.Amount,
 		})
 		if err != nil {
 			return err
@@ -886,3 +888,117 @@ func addMoney(
 	return
 }
 ```
+
+## <a id="9"></a> 9. Understand isolation levels & read phenomena in MySQL & PostgreSQL via examples
+
+Isolation is a part of the ACID property (along with Atomacity, Consistency and Durability), which must be satisfied by a database transaction, meaning that concurrent transactions must not affect each other.
+
+Read Phenomena:
+- DIRTY READ\
+A transaction **reads** data written by other concurrent **uncommitted** transaction
+- NON-REPEATABLE READ\
+A transaction **reads** the **same row twice** and sees different value because it has been **modified** by other **committed** transaction
+- PHANTOM READ\
+A transaction **re-executes** a query to **find rows** that satisfy a condition and sees a **different set** of rows, due to changes by other **commited** transaction
+- SERIALIZATION ANOMALY\
+The result of a **group** of concurrent **committed transactions** is **impossible to achieve** if we try to run them **sequentially** in any order without overlapping
+
+4 Standard Isolation Level according to American National Standards Institute (ANSI):
+1. READ UNCOMMITTED\
+Can see data written by uncommitted transaction
+2. READ COMMITTED\
+Only see data written by committed transaction
+3. REPEATABLE READ\
+Sama read query always returns same result
+4. SERIALIZABLE\
+Can achieve same result if execute transactions serially in some order instead of concurrenctly
+
+### Isolation Levels in MySQL
+
+|                           | READ<br/>UNCOMMITTED | READ<br/>COMMITTED | REPEATABLE<br/>READ | SERIALIZABLE |
+|:-------------------------:|:--------------------:|:------------------:|:-------------------:|:------------:|
+| DIRTY<br/>READ            | +                    | -                  | -                   | -            |
+| <nobr>NON-REPEATABLE<nobr/><br/>READ | +         | +                  | -                   | -            |
+| PHANTOM<br/>READ          | +                    | +                  | -                   | -            |
+| SERIALIZATION<br/>ANOMALY | +                    | +                  | +                   | -            |
+
+To get the transaction isolation level of the current session run inside the database console:
+
+```sql
+select @@transaction_isolation;  -- default: REPEATABLE-READ
+```
+
+To get the global transaction isolation level applied to all sessions:
+
+```sql
+select @@global.transaction_isolation;  -- default: REPEATABLE-READ
+```
+
+To change the isolation level of current session:
+
+```sql
+set session transaction isolation level read uncommitted;  -- or: "read committed", "repeatable read", "serializable"
+```
+
+To start a new transaction:
+
+```sql
+start transaction;
+```
+
+or:
+
+```sql
+begin;
+```
+
+To commit changes of the current transaction:
+
+```sql
+commit;
+```
+
+To cancel changes made by the current transaction:
+
+```sql
+rollback;
+```
+
+### Isolation Levels in PostgreSQL
+
+|                           | READ<br/>UNCOMMITTED | READ<br/>COMMITTED | REPEATABLE<br/>READ | SERIALIZABLE |
+|:-------------------------:|:--------------------:|:------------------:|:-------------------:|:------------:|
+| DIRTY<br/>READ            | -                    | -                  | -                   | -            |
+| <nobr>NON-REPEATABLE<nobr/><br/>READ | +         | +                  | -                   | -            |
+| PHANTOM<br/>READ          | +                    | +                  | -                   | -            |
+| SERIALIZATION<br/>ANOMALY | +                    | +                  | +                   | -            |
+
+To get the current isolation level run inside the database console:
+
+```sql
+show transaction isolation level;  -- default: read committed
+```
+
+To set the isolation level within the current transaction:
+
+```sql
+begin;
+
+set transaction isolation level read uncommitted;  -- or: "read committed", "repeatable read", "serializable"
+
+-- "commit" or "rollback" this transaction later
+```
+
+### Compare MySQL vs PostgreSQL
+
+| MySQL                     | PostgreSQL               |
+|:--------------------------|:-------------------------|
+| 4 ISOLATION LEVELS        | 3 ISOLATION LEVELS       |
+| LOCKING MECHANISM         | DEPENDENCIES DETECTION   |
+|REPEATABLE READ BY DEFAULT | READ COMMITED BY DEFAULT |
+
+Keep in mind:
+- RETRY MECHANISM\
+There might be errors, timeout or deadlock
+- READ DOCUMENTATION\
+Each database engine might implement isolation level differently
