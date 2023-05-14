@@ -21,6 +21,8 @@ My implementation of the Tech School's [backend master class](https://www.youtub
 
 [9. Understand isolation levels & read phenomena in MySQL & PostgreSQL via examples](#9)
 
+[10. Setup Github Actions for Golang + Postgres to run automated tests](#10)
+
 ## <a id="1"></a> 1. Design DB schema and generate SQL code with dbdiagram.io
 
 Check the dbdiagram.io [schema](https://dbdiagram.io/d/644e30eadca9fb07c4452f97) described in DBML.
@@ -1002,3 +1004,94 @@ Keep in mind:
 There might be errors, timeout or deadlock
 - READ DOCUMENTATION\
 Each database engine might implement isolation level differently
+
+## <a id="10"></a> 10. Setup Github Actions for Golang + Postgres to run automated tests
+
+Workflow:
+- is an automated procedure
+- made up of 1+ jobs
+- triggered by events, scheduled, or manually
+- add .yml file to repository
+
+Runner:
+- is a server to run the jobs
+- run 1 job at a time
+- GitHub hosted or self hosted
+- report progress, logs & result to GitHub
+
+Job:
+- is a set of steps execute on the same runner
+- normal jobs run in parallel
+- dependent jobs run serially
+
+Step:
+- is an individual task
+- run serially within a job
+- contain 1+ actions
+
+Action:
+- is a standalone command
+- run serially within a step
+- can be reused
+
+Within the project directory, create a new folder `.github/workflows`:
+
+```bash
+mkdir -p .github/workflows
+```
+
+Create a new YAML file `ci.yml` for the workflow inside this folder:
+
+```yaml
+name: ci-test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: simple_bank
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version: ^1.20
+      id: go
+
+    - name: Install golang-migrate
+      run: |
+        curl -L https://github.com/golang-migrate/migrate/releases/download/v4.15.2/migrate.linux-amd64.tar.gz | tar xvz
+        sudo mv migrate /usr/bin/
+        which migrate
+
+    - name: Run migrations
+      run: make migrateup
+
+    - name: Test
+      run: make test
+```
