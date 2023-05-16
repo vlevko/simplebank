@@ -23,6 +23,8 @@ My implementation of the Tech School's [backend master class](https://www.youtub
 
 [10. Setup Github Actions for Golang + Postgres to run automated tests](#10)
 
+[11. Implement RESTful HTTP API in Go using Gin](#11)
+
 ## <a id="1"></a> 1. Design DB schema and generate SQL code with dbdiagram.io
 
 Check the dbdiagram.io [schema](https://dbdiagram.io/d/644e30eadca9fb07c4452f97) described in DBML.
@@ -1095,3 +1097,251 @@ jobs:
     - name: Test
       run: make test
 ```
+
+## <a id="11"></a> 11. Implement RESTful HTTP API in Go using Gin
+
+Popular web frameworks:
+- Gin
+- Beego
+- Echo
+- Revel
+- Martini
+- Fiber
+- Buffalo
+
+Popular HTTP routers:
+- FastHttp
+- Gorilla Mux
+- HttpRouter
+- Chi
+
+Install the [Gin](https://github.com/gin-gonic/gin) framework:
+
+```bash
+go get -u github.com/gin-gonic/gin
+```
+
+Inside the project directory create a new folder `api`:
+
+```bash
+mkdir api
+```
+
+Create a new `server.go` file in the `api` folder:
+
+```go
+package api
+
+import (
+	"github.com/gin-gonic/gin"
+	db "github.com/vlevko/simplebank/db/sqlc"
+)
+
+// Server serves HTTP requests for our banking service.
+type Server struct {
+	store  *db.Store
+	router *gin.Engine
+}
+
+// NewServer creates a new HTTP server and setup routing.
+func NewServer(store *db.Store) *Server {
+	server := &Server{store: store}
+	router := gin.Default()
+
+	router.POST("/accounts", server.createAccount)
+
+	server.router = router
+	return server
+}
+
+// Start runs the HTTP server on a specific address
+func (server *Server) Start(address string) error {
+	return server.router.Run(address)
+}
+
+func errorResponse(err error) gin.H {
+	return gin.H{"error": err.Error()}
+}
+```
+
+Create a new `account.go` file with the `createAccount` handler function in the same folder:
+
+```go
+package api
+
+import (
+	"net/http"
+
+	db "github.com/vlevko/simplebank/db/sqlc"
+
+	"github.com/gin-gonic/gin"
+)
+
+type CreateAccountRequest struct {
+	Owner    string `json:"owner" binding:"required"`
+	Currency string `json:"currency" binding:"required,oneof=USD EUR"`
+}
+
+func (server *Server) createAccount(ctx *gin.Context) {
+	var req CreateAccountRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, errorResponse(err))
+		return
+	}
+
+	arg := db.CreateAccountParams{
+		Owner:    req.Owner,
+		Currency: req.Currency,
+		Balance:  0,
+	}
+
+	account, err := server.store.CreateAccount(ctx, arg)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, errorResponse(err))
+		return
+	}
+
+	ctx.JSON(http.StatusOK, account)
+}
+```
+
+Create a new `main.go` file with an entry point for the server in the project directory:
+
+```go
+package main
+
+import (
+	"database/sql"
+	"log"
+
+	_ "github.com/lib/pq"
+	"github.com/vlevko/simplebank/api"
+	db "github.com/vlevko/simplebank/db/sqlc"
+)
+
+const (
+	dbDriver      = "postgres"
+	dbSource      = "postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable"
+	serverAddress = "0.0.0.0:8080"
+)
+
+func main() {
+	conn, err := sql.Open(dbDriver, dbSource)
+	if err != nil {
+		log.Fatal("cannot connect to db:", err)
+	}
+
+	store := db.NewStore(conn)
+	server := api.NewServer(store)
+
+	err = server.Start(serverAddress)
+	if err != nil {
+		log.Fatal("cannot start serer:", err)
+	}
+}
+```
+
+Add a new `server` command to the `Makefile` to run the server:
+
+```Makefile
+server:
+	go run main.go
+
+.PHONY: ... server
+```
+
+Add an API to get a specific account by ID.
+
+In the `server.go` file add a new route:
+
+```go
+func NewServer(store *db.Store) *Server {
+	...
+	router.GET("/accounts/:id", server.getAccount)
+	...
+}
+```
+
+Implement a new `getAccount` handler function in the `account.go` file:
+
+```go
+import (
+	"database/sql"
+	...
+)
+
+...
+func (server *Server) getAccount(ctx *gin.Context) {
+	var req getAccountRequest
+	if err := ctx.ShouldBindUri(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, errorResponse(err))
+		return
+	}
+
+	account, err := server.store.GetAccount(ctx, req.ID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			ctx.JSON(http.StatusNotFound, errorResponse(err))
+			return
+		}
+
+		ctx.JSON(http.StatusInternalServerError, errorResponse(err))
+		return
+	}
+
+	ctx.JSON(http.StatusOK, account)
+}
+```
+
+Implement a `listAccounts` API with pagination.
+
+Add a new route in the `server.go` file:
+
+```go
+func NewServer(store *db.Store) *Server {
+	...
+	router.GET("/accounts", server.listAccounts)
+	...
+}
+```
+
+Implement a `listAccounts` handler function in the `account.go` file:
+
+```go
+...
+type listAccountsRequest struct {
+	PageID   int32 `form:"page_id" binding:"required,min=1"`
+	PageSize int32 `form:"page_size" binding:"required,min=5,max=10"`
+}
+
+func (server *Server) listAccounts(ctx *gin.Context) {
+	var req listAccountsRequest
+	if err := ctx.ShouldBindQuery(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, errorResponse(err))
+		return
+	}
+
+	arg := db.ListAccountsParams{
+		Limit:  req.PageSize,
+		Offset: (req.PageID - 1) * req.PageSize,
+	}
+
+	accounts, err := server.store.ListAccounts(ctx, arg)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, errorResponse(err))
+		return
+	}
+
+	ctx.JSON(http.StatusOK, accounts)
+}
+```
+
+In the `sqlc.yaml` file change the value of the `emit_empty_slices` setting to `true` in order to receive the empy list of accounts instead of `nil`:
+
+```yaml
+packages:
+  - name: "db"
+    emit_empty_slices: true
+```
+
+Run the `make sqlc` command to regenerate the code.
