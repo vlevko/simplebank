@@ -25,6 +25,8 @@ My implementation of the Tech School's [backend master class](https://www.youtub
 
 [11. Implement RESTful HTTP API in Go using Gin](#11)
 
+[12. Load config from file & environment variables in Golang with Viper](#12)
+
 ## <a id="1"></a> 1. Design DB schema and generate SQL code with dbdiagram.io
 
 Check the dbdiagram.io [schema](https://dbdiagram.io/d/644e30eadca9fb07c4452f97) described in DBML.
@@ -1345,3 +1347,113 @@ packages:
 ```
 
 Run the `make sqlc` command to regenerate the code.
+
+## <a id="12"></a> 12. Load config from file & environment variables in Golang with Viper
+
+WHY FILE?\
+DEVELOPMENT\
+Easily specify default configuration for local develoment and testing
+
+WHY ENV VARS?\
+DEPLOYMENT\
+Easily override the default configurations when deploy with docker containers
+
+WHY VIPER?
+- Find, load, unmarshal config file\
+JSON, TOML, YAML, ENV, INI
+- Read config from environment variables or flags\
+Override existing values, set default values
+- Read config from remote system\
+Etcd, Consul
+- Live watching and writing config file\
+Reread changed file, save any modifications
+
+Install the [Viper](https://github.com/spf13/viper) package:
+
+```bash
+go get github.com/spf13/viper
+```
+
+Create a new `app.env` file in the project directory to store the config values for development:
+
+```env
+DB_DRIVER=postgres
+DB_SOURCE=postgresql://root:secret@localhost:5432/simple_bank?sslmode=disable
+SERVER_ADDRESS=0.0.0.0:8080
+```
+
+Create a new file `config.go` inside the `util` package:
+
+```go
+package util
+
+import "github.com/spf13/viper"
+
+// Config stores all configuration of the application.
+// The values are read by viper from a config file or environment variables.
+type Config struct {
+	DBDriver      string `mapstructure:"DB_DRIVER"`
+	DBSource      string `mapstructure:"DB_SOURCE"`
+	ServerAddress string `mapstructure:"SERVER_ADDRESS"`
+}
+
+// LoadConfig reads configuration from file or environment variables.
+func LoadConfig(path string) (config Config, err error) {
+	viper.AddConfigPath(path)
+	viper.SetConfigName("app")
+	viper.SetConfigType("env")
+
+	viper.AutomaticEnv()
+
+	err = viper.ReadInConfig()
+	if err != nil {
+		return
+	}
+
+	err = viper.Unmarshal(&config)
+	return
+}
+```
+
+Remove the const values from the `main.go` file and replace their usage with the `config` variable:
+
+```go
+import (
+	...
+	"github.com/vlevko/simplebank/util"
+)
+
+func main() {
+	config, err := util.LoadConfig(".")
+	if err != nil {
+		log.Fatal("cannot load config:", err)
+	}
+
+	conn, err := sql.Open(config.DBDriver, config.DBSource)
+	...
+	err = server.Start(config.ServerAddress)
+	...
+}
+```
+
+Remove the const values from the `main_test.go` file and replace their usage with the `config` variable:
+
+```go
+import (
+	...
+	"github.com/vlevko/simplebank/util"
+)
+
+var ...
+var ...
+
+func TestMain(m *testing.M) {
+	config, err := util.LoadConfig("../..")
+	if err != nil {
+		log.Fatal("cannot load config:", err)
+	}
+
+	testDB, err = sql.Open(config.DBDriver, config.DBSource)
+	...
+}
+```
